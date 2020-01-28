@@ -1,0 +1,41 @@
+package main
+
+import (
+	"fmt"
+	"strconv"
+	"sync"
+)
+
+var wgOut sync.WaitGroup
+
+
+func main() {
+	//
+	//go creatServerInstance("12345",429496729,[][]string{[]string{"3717024072","127.0.0.1","12346"}})
+
+	//wgOut.Add(3)
+	routeMultiplexer:= calculateRoutingTable(3,"127.0.0.1",12341)
+	fmt.Println()
+	for route := range routeMultiplexer.routeAddresses{
+		fmt.Println(route,routeMultiplexer.nodeAddresses[strconv.FormatUint(uint64(route),10)][2], routeMultiplexer.routeAddresses[route])
+
+	}
+
+	//wgOut.Wait()
+	//files /home/maroc/Videos/d.jpg /home/maroc/Downloads/e.png  "/home/maroc/Downloads/master.pdf"
+	// /home/maroc/Videos/ds_test_files/a.jpg
+
+	//fileHandler:=FileHandler{}
+	//
+	//fileHandler.FileName="a.jpg"
+	//fmt.Println(fileHandler.hash())
+	//
+	//fileHandler.FileName="xa.png"
+	//fmt.Println(fileHandler.hash())
+	//
+	//fileHandler.FileName="zzz.pdf"
+	//fmt.Println(fileHandler.hash())
+
+}
+
+

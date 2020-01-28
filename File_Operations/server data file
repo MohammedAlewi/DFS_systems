@@ -1,0 +1,565 @@
+package main
+
+import (
+	"bytes"
+	"encoding/gob"
+	"fmt"
+	"net"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+type SERVER struct {
+	serverID    uint32
+	portNo      string
+	fileHandler FileHandler
+	dbHandler  FileEntry
+	listener net.Listener
+	wg sync.WaitGroup
+	dbFileName string
+	connection net.Conn
+}
+
+func (server *SERVER) setDbFilename(filename string){
+	server.dbFileName="Communication/server/"+filename
+	server.dbHandler.dbFileName="Communication/server/"+filename
+}
+
+func (server *SERVER) createListenerConnection() { //net.Listener
+	fmt.Printf("[NODE %d]: listening connection from a client or remote node\n",server.serverID)
+
+	listener, err := net.Listen("tcp", ":"+server.portNo)
+	server.listener=listener
+	server.checkError(err)
+}
+
+func (server *SERVER) createConnection(clientAdd string,port string) bool {
+	server.wg.Add(1)
+	conn, err:= net.Dial("tcp",clientAdd+":"+port)
+	if err!=nil{
+		fmt.Printf("[NODE %d]: unable to connected with a remote node\n",server.serverID)
+		return false
+	}
+	server.connection=conn
+
+	fmt.Printf("[NODE %d]: connected with a client node\n",server.serverID)
+	return true
+}
+
+func (server *SERVER) getClientRequest(hashValue string) Message {
+	server.dbHandler.dbFileName=server.dbFileName
+	//server.dbHandler.openDb()
+	server.dbHandler.setupDb()
+	result:=server.dbHandler.getFileEntries(hashValue)
+	if result{
+		fmt.Printf("[NODE %d]: File Found [%s] %s\n",server.serverID,server.dbHandler.hashValue,server.dbHandler.fileName)
+		server.fileHandler.FileName="Communication/server/receivedData/"+hashValue+"__"+server.dbHandler.fileName
+		message:=server.fileHandler.readFile()
+		message.FileName=server.dbHandler.fileName
+		return message
+	}else{
+		fmt.Printf("[NODE %d]: NOT FOUND\n",server.serverID)
+		return Message{}
+	}
+}
+
+func (server *SERVER) sendMessageToClient(messageObj Message){
+	defer server.wg.Done()
+
+	binBuf := new(bytes.Buffer)
+	goBufferObj := gob.NewEncoder(binBuf)
+	goBufferObj.Encode(messageObj)
+
+	_,err2:=server.connection.Write(binBuf.Bytes())
+	server.checkError(err2)
+	server.connection.Close()
+
+	fmt.Printf("[NODE %d]: Message sent to the client.\n",server.serverID)
+	server.checkError(err2)
+}
+
+func (server *SERVER) acceptConnection(){
+	server.wg.Add(1)
+	conn,err := server.listener.Accept()
+
+	server.checkError(err)
+	go server.handleConnection(conn)
+
+	server.wg.Wait()
+}
+
+func (server *SERVER) receiveMessageFromClient(message Message){
+	// file saved at the server
+	server.fileHandler.setFileHandler(message)
+	server.fileHandler.writeFile()
+
+	// file hash and access  path saved at the database
+	server.dbHandler.dbFileName=server.dbFileName
+	server.dbHandler.setupDb()
+	//server.dbHandler.openDb()
+	server.dbHandler.setRecordState(server.fileHandler.hash(),server.fileHandler.FileName)
+	server.dbHandler.insertFileEntry()
+
+	fmt.Printf("[NODE %d]: file %s have been accepted and saved in local working dir and database\n",server.serverID,message.FileName)
+}
+
+
+func (server *SERVER) handleConnection(conn net.Conn){
+	defer server.wg.Done()
+
+	dec := gob.NewDecoder(conn)
+	messageObject := &Message{}
+	dec.Decode(messageObject)
+	conn.Close()
+
+	switch messageObject.COMMAND {
+		case  SAVE_FILE:{
+			server.receiveMessageFromClient(*messageObject)
+		}
+		case  GET_FILE:{
+			server.fileHandler.FileName=messageObject.FileName
+			msg:=server.getClientRequest(server.fileHandler.hash())
+			if len(msg.FileName)!=0{
+				server.createConnection(messageObject.SenderIP,messageObject.SenderPort)
+				msg.COMMAND=FILE_FOUND
+				msg.SenderIP=strings.Split(conn.LocalAddr().String(),":")[0]
+				msg.SenderPort=server.portNo
+				server.sendMessageToClient(msg)
+			}else{
+				server.createConnection(messageObject.SenderIP,messageObject.SenderPort)
+				msg.COMMAND=FILE_NOT_FOUND
+				msg.FileName=messageObject.FileName
+				msg.SenderIP=strings.Split(conn.LocalAddr().String(),":")[0]
+				msg.SenderPort=server.portNo
+				fmt.Println(msg)
+				server.sendMessageToClient(msg)
+			}
+		}
+	}
+
+
+}
+
+func (server *SERVER) closeListener(){
+	server.listener.Close()
+}
+
+func (server *SERVER) checkError(err error){
+	if err!=nil{
+		panic(err)
+	}
+}
+
+// routing's
+func (server *SERVER) updateRoutingtable(routes [][]string){
+	for _, route := range routes {
+		server.dbHandler.insertRoutingAddress(route[0],route[1],route[2])
+	}
+}
+
+func (server *SERVER) getBestNode(fileHashValue string) map[int]string {
+	nodeIds:=server.dbHandler.getAllRoutingID();
+	weights:=make(map[int]string)
+
+	fileBinHash,_:=strconv.ParseUint(fileHashValue, 10, 32)
+	for _,routeID := range nodeIds{
+		intId,_:=strconv.ParseUint(routeID, 10, 32)
+		currentWeight:=intId ^ fileBinHash
+		weights[int(currentWeight)]= routeID
+	}
+	return weights
+}
+
+func (server *SERVER) chooseBestNodeSaveFile(messageObject Message){
+	server.fileHandler.FileName=messageObject.FileName
+	fileHashValue:=server.fileHandler.hash()
+
+	nodes:=server.getBestNode(fileHashValue)
+
+	keys:=[]int{}
+	for  key := range nodes  {
+		keys=append(keys, key)
+	}
+	sort.Ints(keys)
+
+	fileBinHash,_:=strconv.ParseUint(fileHashValue, 10, 32)
+	selfWeight := fileBinHash^uint64(server.serverID)
+
+	if int(selfWeight)<= keys[0]{
+		fmt.Printf("[NODE %d]: current Node is the best node to save the file \n",server.serverID)
+
+		server.receiveMessageFromClient(messageObject)
+	}else{
+		//for key:= range keys{
+		nodeAddress:= server.dbHandler.getRoutingAddress(nodes[keys[0]])
+		result:=server.createConnection(nodeAddress[0],nodeAddress[1])
+		if result{server.sendMessageToClient(messageObject)}
+		//}
+	}
+}
+
+func (server *SERVER) chooseBestNodeToPropagateRequest(messageObject Message,conn net.Conn){
+	server.fileHandler.FileName=messageObject.FileName
+	fileHashValue:=server.fileHandler.hash()
+
+	nodes:=server.getBestNode(fileHashValue)
+
+	keys:=[]int{}
+	for  key := range nodes  {
+		keys=append(keys, key)
+	}
+	sort.Ints(keys)
+
+	fileBinHash,_:=strconv.ParseUint(fileHashValue, 10, 32)
+	selfWeight := fileBinHash^uint64(server.serverID)
+
+	if int(selfWeight)<= keys[0]{
+		fmt.Printf("[NODE - %d]: current Node is the best node to get the file from \n",server.serverID)
+
+		server.fileHandler.FileName=messageObject.FileName
+		msg:=server.getClientRequest(server.fileHandler.hash())
+		if len(msg.FileName)!=0{
+			server.createConnection(messageObject.SenderIP,messageObject.SenderPort)
+			msg.COMMAND=FILE_FOUND
+			msg.SenderIP=strings.Split(conn.LocalAddr().String(),":")[0]
+			msg.SenderPort=server.portNo
+			server.sendMessageToClient(msg)
+		}else{
+			server.createConnection(messageObject.SenderIP,messageObject.SenderPort)
+			msg.COMMAND=FILE_NOT_FOUND
+			msg.FileName=messageObject.FileName
+			msg.SenderIP=strings.Split(conn.LocalAddr().String(),":")[0]
+			msg.SenderPort=server.portNo
+			fmt.Println(msg)
+			server.sendMessageToClient(msg)
+		}
+	}else{
+		nodeAddress:= server.dbHandler.getRoutingAddress(nodes[keys[0]])
+		result:=server.createConnection(nodeAddress[0],nodeAddress[1])
+		if result{server.sendMessageToClient(messageObject)}
+	}
+}
+
+// interactions
+func setupServer(port string,serverID uint32) SERVER {
+	server:=SERVER{}
+	server.portNo=port
+	server.serverID=serverID
+	server.setDbFilename(fmt.Sprint(serverID)+"_serverData.db")
+	server.dbHandler.setupDb()
+	//server.dbHandler.openDb()
+	return  server
+}
+
+
+
+
+func main() {
+
+	server:=setupServer("12345",45122)
+	//
+	server.createListenerConnection()
+	server.acceptConnection()
+	server.closeListener()
+}
+
+
+
+
+// VERSION 2....................................................
+
+package main
+
+import (
+	"bytes"
+	"encoding/gob"
+	"fmt"
+	"net"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+type SERVER struct {
+	serverID    uint32
+	portNo      string
+	fileHandler FileHandler
+	dbHandler  FileEntry
+	listener net.Listener
+	wg sync.WaitGroup
+	dbFileName string
+	connection net.Conn
+}
+
+func (server *SERVER) createListenerConnection() { //net.Listener
+	fmt.Printf("[NODE %d]: listening connection from a client or remote node\n",server.serverID)
+
+	listener, err := net.Listen("tcp", ":"+server.portNo)
+	server.listener=listener
+	server.checkError(err)
+}
+
+func (server *SERVER) createConnection(clientAdd string,port string) bool {
+	server.wg.Add(1)
+	conn, err:= net.Dial("tcp",clientAdd+":"+port)
+	if err!=nil{
+		fmt.Printf("[NODE %d]: unable to connected with a remote node\n",server.serverID)
+		return false
+	}
+	server.connection=conn
+
+	fmt.Printf("[NODE %d]: connected with a client node\n",server.serverID)
+	return true
+}
+
+func (server *SERVER) getClientRequest(hashValue string) Message {
+	server.dbHandler.dbFileName=server.dbFileName
+	//server.dbHandler.openDb()
+	server.dbHandler.setupDb()
+	result:=server.dbHandler.getFileEntries(hashValue)
+	if result{
+		fmt.Printf("[NODE %d]: File Found [%s] %s\n",server.serverID,server.dbHandler.hashValue,server.dbHandler.fileName)
+		server.fileHandler.FileName="Communication/server/receivedData/"+hashValue+"__"+server.dbHandler.fileName
+		message:=server.fileHandler.readFile()
+		message.FileName=server.dbHandler.fileName
+		return message
+	}else{
+		fmt.Printf("[NODE %d]: NOT FOUND\n",server.serverID)
+		return Message{}
+	}
+}
+
+func (server *SERVER) sendMessageToClientNode(messageObj Message){
+	defer server.wg.Done()
+
+	binBuf := new(bytes.Buffer)
+	goBufferObj := gob.NewEncoder(binBuf)
+	goBufferObj.Encode(messageObj)
+
+	_,err2:=server.connection.Write(binBuf.Bytes())
+	server.checkError(err2)
+	server.connection.Close()
+
+	fmt.Printf("[NODE %d]: Message sent to the client.\n",server.serverID)
+	server.checkError(err2)
+}
+
+func (server *SERVER) acceptConnection(){
+	for true==true{
+		server.wg.Add(1)
+		conn,err := server.listener.Accept()
+
+		server.checkError(err)
+		go server.handleConnection(conn)
+
+	}
+	server.wg.Wait()
+}
+
+func (server *SERVER) receiveMessageFromClient(message Message){
+	// file saved at the server
+	server.fileHandler.setFileHandler(message)
+	server.fileHandler.writeFile()
+
+	// file hash and access  path saved at the database
+	server.dbHandler.dbFileName=server.dbFileName
+	server.dbHandler.setupDb()
+	//server.dbHandler.openDb()
+	server.dbHandler.setRecordState(server.fileHandler.hash(),server.fileHandler.FileName)
+	server.dbHandler.insertFileEntry()
+
+	fmt.Printf("[NODE %d]: file %s have been accepted and saved in local working dir and database\n",server.serverID,message.FileName)
+}
+
+
+func (server *SERVER) handleConnection(conn net.Conn){
+	defer server.wg.Done()
+
+	dec := gob.NewDecoder(conn)
+	messageObject := &Message{}
+	dec.Decode(messageObject)
+	conn.Close()
+
+	switch messageObject.COMMAND {
+		case  SAVE_FILE:{
+			//server.receiveMessageFromClient(*messageObject)
+			server.chooseBestNodeToSaveFile(*messageObject)
+		}
+		case  GET_FILE:{
+			server.chooseBestNodeToPropagateRequest(*messageObject,conn)
+			//server.fileHandler.FileName=messageObject.FileName
+			//msg:=server.getClientRequest(server.fileHandler.hash())
+			//if len(msg.FileName)!=0{
+			//	server.createConnection(messageObject.SenderIP,messageObject.SenderPort)
+			//	msg.COMMAND=FILE_FOUND
+			//	msg.SenderIP=strings.Split(conn.LocalAddr().String(),":")[0]
+			//	msg.SenderPort=server.portNo
+			//	server.sendMessageToClientNode(msg)
+			//}else{
+			//	server.createConnection(messageObject.SenderIP,messageObject.SenderPort)
+			//	msg.COMMAND=FILE_NOT_FOUND
+			//	msg.FileName=messageObject.FileName
+			//	msg.SenderIP=strings.Split(conn.LocalAddr().String(),":")[0]
+			//	msg.SenderPort=server.portNo
+			//	fmt.Println(msg)
+			//	server.sendMessageToClientNode(msg)
+			//}
+		}
+	}
+
+
+}
+
+func (server *SERVER) closeListener(){
+	server.listener.Close()
+}
+
+func (server *SERVER) checkError(err error){
+	if err!=nil{
+		panic(err)
+	}
+}
+
+// routing's
+func (server *SERVER) getBestNode(fileHashValue string) map[int]string {
+	nodeIds:=server.dbHandler.getAllRoutingID();
+	weights:=make(map[int]string)
+
+	fileBinHash,_:=strconv.ParseUint(fileHashValue, 10, 32)
+	for _,routeID := range nodeIds{
+		intId,_:=strconv.ParseUint(routeID, 10, 32)
+		currentWeight:=intId ^ fileBinHash
+		weights[int(currentWeight)]= routeID
+	}
+	return weights
+}
+
+func (server *SERVER) chooseBestNodeToSaveFile(messageObject Message){
+	server.fileHandler.FileName=messageObject.FileName
+	fileHashValue:=server.fileHandler.hash()
+
+	nodes:=server.getBestNode(fileHashValue)
+
+	keys:=[]int{}
+	for  key := range nodes  {
+		keys=append(keys, key)
+	}
+	sort.Ints(keys)
+
+	fileBinHash,_:=strconv.ParseUint(fileHashValue, 10, 32)
+	selfWeight := fileBinHash^uint64(server.serverID)
+
+	if len(keys)==0 || int(selfWeight)<= keys[0]{
+		fmt.Printf("[NODE %d]: current Node is the best node to save the file \n",server.serverID)
+
+		server.receiveMessageFromClient(messageObject)
+	}else{
+		//for key:= range keys{
+		nodeAddress:= server.dbHandler.getRoutingAddress(nodes[keys[0]])
+		result:=server.createConnection(nodeAddress[0],nodeAddress[1])
+		if result{server.sendMessageToClientNode(messageObject)}
+		//}
+	}
+}
+
+func (server *SERVER) chooseBestNodeToPropagateRequest(messageObject Message,conn net.Conn){
+	server.fileHandler.FileName=messageObject.FileName
+	fileHashValue:=server.fileHandler.hash()
+
+	nodes:=server.getBestNode(fileHashValue)
+
+	keys:=[]int{}
+	for  key := range nodes  {
+		keys=append(keys, key)
+	}
+	sort.Ints(keys)
+
+	fileBinHash,_:=strconv.ParseUint(fileHashValue, 10, 32)
+	selfWeight := fileBinHash^uint64(server.serverID)
+
+	if len(keys)==0 || int(selfWeight)<= keys[0]{
+		fmt.Printf("[NODE %d]: current Node is the best node to get the file from \n",server.serverID)
+
+		msg:=server.getClientRequest(fileHashValue)
+		if len(msg.FileName)!=0{
+			server.createConnection(messageObject.SenderIP,messageObject.SenderPort)
+			msg.COMMAND=FILE_FOUND
+			msg.SenderIP=strings.Split(conn.LocalAddr().String(),":")[0]
+			msg.SenderPort=server.portNo
+			server.sendMessageToClientNode(msg)
+		}else{
+			server.createConnection(messageObject.SenderIP,messageObject.SenderPort)
+			msg.COMMAND=FILE_NOT_FOUND
+			msg.FileName=messageObject.FileName
+			msg.SenderIP=strings.Split(conn.LocalAddr().String(),":")[0]
+			msg.SenderPort=server.portNo
+			//fmt.Println(msg)
+			server.sendMessageToClientNode(msg)
+		}
+	}else{
+		nodeAddress:= server.dbHandler.getRoutingAddress(nodes[keys[0]])
+		result:=server.createConnection(nodeAddress[0],nodeAddress[1])
+		if result{server.sendMessageToClientNode(messageObject)}
+	}
+}
+// setup server vars
+func (server *SERVER) updateRoutingtable(routes [][]string){
+	for _, route := range routes {
+		server.dbHandler.insertRoutingAddress(route[0],route[1],route[2])
+	}
+}
+
+func (server *SERVER) setDbFilename(filename string){
+	server.dbFileName="Communication/server/"+filename
+	server.dbHandler.dbFileName="Communication/server/"+filename
+}
+
+// interactions
+func setupServer(port string,serverID uint32,routeTableInfo [][]string) SERVER {
+	server:=SERVER{}
+	server.portNo=port
+	server.serverID=serverID
+	server.setDbFilename(fmt.Sprint(serverID)+"_serverData.db")
+	server.dbHandler.setupDb()
+	server.updateRoutingtable(routeTableInfo)
+	return  server
+}
+
+// .................. create server object .................... //
+func creatServerInstance(port string, serverid uint32,routes [][]string){
+	defer wgOut.Done()
+	server:=setupServer(port,serverid,routes)
+	server.createListenerConnection()
+	server.acceptConnection()
+	server.closeListener()
+}
+
+
+
+
+
+
+//var wgOut sync.WaitGroup
+//
+
+//
+//func main() {
+//	//wgOut.Add(2)
+//	//go creatServerInstance("12345",429496729,[][]string{[]string{"3717024072","127.0.0.1","12346"}})
+//	//go creatServerInstance("12346",3717024072,[][]string{[]string{"429496729","127.0.0.1","12345"}})
+//	//wgOut.Wait()
+//	routeMultiplexer:=RouteMultiplexer{}
+//	routeMultiplexer.setupVariables(10)
+//	routeMultiplexer.findAllNodeId()
+//	routeMultiplexer.calculateRouteEntries()
+//	fmt.Println(routeMultiplexer.nodes)
+//	for route := range routeMultiplexer.routingTable{
+//		fmt.Println(route, routeMultiplexer.routingTable[route])
+//	}
+//
+//}
+//
+//

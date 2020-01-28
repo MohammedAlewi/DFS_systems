@@ -1,0 +1,363 @@
+package main
+
+import (
+	"bytes"
+	"encoding/gob"
+	"fmt"
+	"net"
+	"sync"
+)
+
+
+
+type Client struct {
+	serverAddress string
+	serverPORT    string
+	address       string
+	PORT          string
+	listener      net.Listener
+	wg sync.WaitGroup
+	connection net.Conn
+	fileHandler FileHandler
+
+}
+
+
+
+func (client *Client) creatConnection(){
+	client.wg.Add(1)
+	conn, err := net.Dial("tcp", client.serverAddress+":"+client.serverPORT)
+	client.checkError(err)
+	client.connection=conn
+	fmt.Println("[Client]: Connection established with the remote node")
+}
+
+func (client *Client) creatListener(){
+	client.wg.Add(1)
+
+	listener, err1  := net.Listen("tcp", ":"+client.PORT)
+	client.checkError(err1)
+	client.listener=listener
+	fmt.Println("[Client]: Waiting to accept file from the remote node")
+	conn,err :=  listener.Accept()
+	client.connection=conn
+	client.checkError(err)
+	go client.recvMessageFromServer()
+}
+
+func (client *Client) sendMessageToServer(messageObj Message){
+	defer client.wg.Done()
+
+	binBuf := new(bytes.Buffer)
+	goBufferObj := gob.NewEncoder(binBuf)
+	goBufferObj.Encode(messageObj)
+
+	_,err2:=client.connection.Write(binBuf.Bytes())
+	client.connection.Close()
+	client.checkError(err2)
+	fmt.Println("[Client]: Message sent to the remote node")
+}
+
+func (client *Client) recvMessageFromServer(){
+	defer client.wg.Done()
+
+	dec := gob.NewDecoder(client.connection)
+	messageObject := &Message{}
+	dec.Decode(messageObject)
+	client.connection.Close()
+
+	switch messageObject.COMMAND {
+		case  FILE_FOUND:{
+			client.fileHandler.setFileHandler(*messageObject)
+			client.fileHandler.writeFile()
+			fmt.Println("[Client]: file ",messageObject.FileName," have been accepted and saved in local working dir")
+		}
+		case FILE_NOT_FOUND:{
+			fmt.Println("[Client]: remote node says file ",messageObject.FileName," NOT FOUND!!")
+		}
+	}
+
+}
+
+func (client *Client) closeListenerConnection(){
+	client.wg.Wait()
+	client.listener.Close()
+}
+
+func (client *Client) closeConnection(){
+	client.wg.Wait()
+}
+
+func (client *Client) checkError(err error){
+	if err!=nil{
+		panic(err)
+	}
+}
+
+
+// interactions
+
+
+func (client *Client) sendFileToServer(filename string){
+	client.fileHandler.FileName=filename
+	message:=client.fileHandler.readFile()
+	message.SenderIP=client.address
+	message.SenderPort=client.PORT
+	message.COMMAND=SAVE_FILE
+	client.creatConnection()
+	client.sendMessageToServer(message)
+	client.closeConnection()
+}
+
+func (client *Client) getFileFromServer(filename string){
+	message:=Message{}
+	message.FileName=filename
+	message.SIZE=12
+	message.COMMAND=GET_FILE
+	message.SenderIP=client.address
+	message.SenderPort=client.PORT
+
+	client.creatConnection()
+	client.sendMessageToServer(message)
+	client.closeConnection()
+
+	client.creatListener()
+	client.closeListenerConnection()
+}
+
+// only for test
+func defaultClientObj() Client {
+	client:=Client{}
+	client.serverPORT="12345"
+	client.serverAddress="127.0.0.1"
+	client.address="127.0.0.1"
+	client.PORT="54321"
+	return client
+}
+
+func main(){
+
+	client:=defaultClientObj()
+
+	//client.sendFileToServer("/home/maroc/Downloads/master.pdf")
+	client.getFileFromServer("master.pdf")
+
+	//files /home/maroc/Videos/d.jpg /home/maroc/Downloads/e.png  "/home/maroc/Downloads/master.pdf"
+	//if uint64(uint32(342))==uint64(342){
+	//	fmt.Println("True uint!")
+	//}
+	//
+	//if int32(uint32(342))==int32(342){
+	//	fmt.Println("True int!")
+	//}
+
+
+
+	//fileBinHash,_:=strconv.ParseUint("88", 10, 32)
+	//fileBinValue:=strconv.FormatUint(uint64(fileBinHash),2)
+	//
+	//fileBinHash2,_:=strconv.ParseUint("86", 10, 32)
+	//fileBinValue2:=strconv.FormatUint(uint64(fileBinHash2),2)
+	//
+	//fmt.Println(fileBinValue,fileBinValue2)
+	//fmt.Println(uint64(fileBinHash)^uint64(fileBinHash2))
+	//fmt.Println(strconv.FormatUint(uint64(fileBinHash)^uint64(fileBinHash2),2))
+}
+
+
+
+
+// ................... VERSION 2.....................................///
+
+
+package main
+
+import (
+	"bytes"
+	"encoding/gob"
+	"fmt"
+	"net"
+	"sync"
+)
+
+
+
+type Client struct {
+	serverAddress string
+	serverPORT    string
+	address       string
+	PORT          string
+	listener      net.Listener
+	wg sync.WaitGroup
+	connection net.Conn
+	fileHandler FileHandler
+
+}
+
+
+
+func (client *Client) creatConnection(){
+	client.wg.Add(1)
+	conn, err := net.Dial("tcp", client.serverAddress+":"+client.serverPORT)
+	client.checkError(err)
+	client.connection=conn
+	fmt.Println("[Client]: Connection established with the remote node")
+}
+
+func (client *Client) creatListener(){
+	client.wg.Add(1)
+
+	listener, err1  := net.Listen("tcp", ":"+client.PORT)
+	client.checkError(err1)
+	client.listener=listener
+	fmt.Println("[Client]: Waiting to accept file from the remote node")
+	conn,err :=  listener.Accept()
+	client.connection=conn
+	client.checkError(err)
+	go client.recvMessageFromServer()
+}
+
+func (client *Client) sendMessageToServer(messageObj Message){
+	defer client.wg.Done()
+
+	binBuf := new(bytes.Buffer)
+	goBufferObj := gob.NewEncoder(binBuf)
+	goBufferObj.Encode(messageObj)
+
+	_,err2:=client.connection.Write(binBuf.Bytes())
+	client.connection.Close()
+	client.checkError(err2)
+	fmt.Printf("[Client]: Message sent to the remote [NODE] with Address %s:%s\n",client.serverAddress,client.serverPORT)
+}
+
+func (client *Client) recvMessageFromServer(){
+	defer client.wg.Done()
+
+	dec := gob.NewDecoder(client.connection)
+	messageObject := &Message{}
+	dec.Decode(messageObject)
+	client.connection.Close()
+
+	switch messageObject.COMMAND {
+		case  FILE_FOUND:{
+			client.fileHandler.setFileHandler(*messageObject)
+			client.fileHandler.writeFile()
+			fmt.Printf("[Client]: message have have been accepted from [NODE] with Address %s:%s\n",messageObject.SenderIP,messageObject.SenderPort)
+			fmt.Println("[Client]: file ",messageObject.FileName," have been accepted and saved in local working dir")
+		}
+		case FILE_NOT_FOUND:{
+			fmt.Printf("[Client]: message have have been accepted from [NODE] with Address %s:%s\n",messageObject.SenderIP,messageObject.SenderPort)
+			fmt.Println("[Client]: remote node says file ",messageObject.FileName," NOT FOUND!!")
+		}
+	}
+
+}
+
+func (client *Client) closeListenerConnection(){
+	client.wg.Wait()
+	client.listener.Close()
+}
+
+func (client *Client) closeConnection(){
+	client.wg.Wait()
+}
+
+func (client *Client) checkError(err error){
+	if err!=nil{
+		panic(err)
+	}
+}
+
+
+// interactions
+
+
+func (client *Client) sendFileToServer(filename string){
+	client.fileHandler.FileName=filename
+	message:=client.fileHandler.readFile()
+	message.SenderIP=client.address
+	message.SenderPort=client.PORT
+	message.COMMAND=SAVE_FILE
+	client.creatConnection()
+	client.sendMessageToServer(message)
+	client.closeConnection()
+}
+
+func (client *Client) getFileFromServer(filename string){
+	message:=Message{}
+	message.FileName=filename
+	message.SIZE=12
+	message.COMMAND=GET_FILE
+	message.SenderIP=client.address
+	message.SenderPort=client.PORT
+
+	client.creatConnection()
+	client.sendMessageToServer(message)
+	client.closeConnection()
+
+	client.creatListener()
+	client.closeListenerConnection()
+}
+
+// only for test
+func defaultClientObj() Client {
+	client:=Client{}
+	client.serverPORT="12346"
+	client.serverAddress="127.0.0.1"
+	client.address="127.0.0.1"
+	client.PORT="54321"
+	return client
+}
+
+func main(){
+
+	fmt.Println()
+	//filehandler:=FileHandler{}
+	//
+	//intV:=^uint32(0)
+	//intbuf:=intV/10
+	//v :=28
+	//for i:=1;i<=10;i++{
+	//	current:=intbuf*uint32(i)
+	//	fmt.Println("Node sep distance:",i,current)
+	//
+	//	fmt.Println("val:",v,uint32(int64(float64(intbuf*2) + math.Pow(2,float64(v)))%int64(intV)))
+	//	v+=1
+	//}
+	//fmt.Println("Node sep distance:",int(math.Log2(float64(intbuf))),int(math.Log2(10)))
+	//
+	//filehandler.FileName="d.jpg"
+	//fmt.Println("d.jpg",filehandler.hash(),)
+	//
+	//filehandler.FileName="e.png"
+	//fmt.Println("e.png",filehandler.hash())
+	//
+	//filehandler.FileName="master.pdf"
+	//fmt.Println("master.pdf",filehandler.hash())
+
+	//client:=defaultClientObj()
+
+	//client.sendFileToServer("/home/maroc/Downloads/master.pdf")
+	//client.getFileFromServer("master.pdf")
+
+	//files /home/maroc/Videos/d.jpg /home/maroc/Downloads/e.png  "/home/maroc/Downloads/master.pdf"
+	//if uint64(uint32(342))==uint64(342){
+	//	fmt.Println("True uint!")
+	//}
+	//
+	//if int32(uint32(342))==int32(342){
+	//	fmt.Println("True int!")
+	//}
+
+
+
+	//fileBinHash,_:=strconv.ParseUint("88", 10, 32)
+	//fileBinValue:=strconv.FormatUint(uint64(fileBinHash),2)
+	//
+	//fileBinHash2,_:=strconv.ParseUint("86", 10, 32)
+	//fileBinValue2:=strconv.FormatUint(uint64(fileBinHash2),2)
+	//
+	//fmt.Println(fileBinValue,fileBinValue2)
+	//fmt.Println(uint64(fileBinHash)^uint64(fileBinHash2))
+	//fmt.Println(strconv.FormatUint(uint64(fileBinHash)^uint64(fileBinHash2),2))
+}
